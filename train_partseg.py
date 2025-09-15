@@ -41,7 +41,7 @@ def to_categorical(y, num_classes):
 
 def parse_args():
     parser = argparse.ArgumentParser('Model')
-    parser.add_argument('--model', type=str, default='rock_part_seg', help='model name')  # 修改模型名称
+    parser.add_argument('--model', type=str, default='rock_part_seg', help='model name')
     parser.add_argument('--batch_size', type=int, default=16, help='batch Size during training')
     parser.add_argument('--epoch', default=20, type=int, help='epoch to run')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='initial learning rate')
@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument('--log_dir', type=str, default=None, help='log path')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='weight decay')
     parser.add_argument('--npoint', type=int, default=2048, help='point Number')
-    parser.add_argument('--color', action='store_true', default=True, help='use color rgb')  # 法向量改为颜色
+    parser.add_argument('--color', action='store_true', default=True, help='use color rgb')
     parser.add_argument('--step_size', type=int, default=20, help='decay step for lr decay')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='decay rate for lr decay')
 
