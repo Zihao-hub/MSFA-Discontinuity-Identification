@@ -1,11 +1,6 @@
-"""
-Author: Benny
-Date: Nov 2019
-Modified: Output 8-column visualization data (xyz + normal + gt + pred)
-"""
 import argparse
 import os
-from data_utils.ShapeNetDataLoader import PartNormalDataset
+from data_utils.DataLoader import ColoredPointDataset  
 import torch
 import logging
 import sys
@@ -18,12 +13,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
-seg_classes = {'Earphone': [16, 17, 18], 'Motorbike': [30, 31, 32, 33, 34, 35], 'Rocket': [41, 42, 43],
-               'Car': [8, 9, 10, 11], 'Laptop': [28, 29], 'Cap': [6, 7], 'Skateboard': [44, 45, 46], 'Mug': [36, 37],
-               'Guitar': [19, 20, 21], 'Bag': [4, 5], 'Lamp': [24, 25, 26, 27], 'Table': [47, 48, 49],
-               'Airplane': [1, 2, 3], 'Pistol': [38, 39, 40], 'Chair': [12, 13, 14, 15], 'Knife': [22, 23]}
 
-seg_label_to_cat = {}  # {0:Airplane, 1:Airplane, ...49:Table}
+seg_classes = {'ComplexRock': [1, 2, 3]}
+
+seg_label_to_cat = {}  # {1:ComplexRock, 2:ComplexRock, 3:ComplexRock}
 for cat in seg_classes.keys():
     for label in seg_classes[cat]:
         seg_label_to_cat[label] = cat
@@ -44,7 +37,7 @@ def parse_args():
     parser.add_argument('--gpu', type=str, default='0', help='specify gpu device')
     parser.add_argument('--num_point', type=int, default=2048, help='point Number')
     parser.add_argument('--log_dir', type=str, required=True, help='experiment root')
-    parser.add_argument('--normal', action='store_true', default=False, help='use normals')
+    parser.add_argument('--color', action='store_true', default=True, help='use color rgb')  # 法向量改为颜色
     parser.add_argument('--num_votes', type=int, default=3, help='aggregate segmentation scores with voting')
     return parser.parse_args()
 
@@ -70,18 +63,20 @@ def main(args):
     log_string('PARAMETER ...')
     log_string(args)
 
-    root = 'data/shapenetcore_partanno_segmentation_benchmark_v0_normal/'
+ 
+    root = 'data/ComplexRock_dataset/'
 
-    TEST_DATASET = PartNormalDataset(root=root, npoints=args.num_point, split='test', normal_channel=args.normal)
+    # 加载测试数据集
+    TEST_DATASET = ColoredPointDataset(root=root, npoints=args.num_point, split='test', color_channel=args.color)
     testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=4)
     log_string("The number of test data is: %d" % len(TEST_DATASET))
-    num_classes = 16
-    num_part = 50
+    num_classes = 1  
+    num_part = 3  
 
     '''MODEL LOADING'''
     model_name = os.listdir(experiment_dir + '/logs')[0].split('.')[0]
     MODEL = importlib.import_module(model_name)
-    classifier = MODEL.get_model(num_part, normal_channel=args.normal).cuda()
+    classifier = MODEL.get_model(num_part, color_channel=args.color).cuda()  
     checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
     classifier.load_state_dict(checkpoint['model_state_dict'])
 
@@ -99,15 +94,16 @@ def main(args):
         total_seen_class = [0 for _ in range(num_part)]
         total_correct_class = [0 for _ in range(num_part)]
         shape_ious = {cat: [] for cat in seg_classes.keys()}
-        seg_label_to_cat = {}  # {0:Airplane, 1:Airplane, ...49:Table}
+        seg_label_to_cat = {}  # {1:ComplexRock, 2:ComplexRock, 3:ComplexRock}
 
         for cat in seg_classes.keys():
             for label in seg_classes[cat]:
                 seg_label_to_cat[label] = cat
 
         classifier = classifier.eval()
-        airplane_part_ious = [0.0, 0.0, 0.0]
-        airplane_part_seen = [0, 0, 0]
+        # 跟踪复杂岩体各部件IoU
+        complex_rock_part_ious = [0.0, 0.0, 0.0]
+        complex_rock_part_seen = [0, 0, 0]
 
         for batch_id, (points, label, target) in tqdm(enumerate(testDataLoader), total=len(testDataLoader), smoothing=0.9):
             batchsize, num_point, _ = points.size()
@@ -126,32 +122,32 @@ def main(args):
             cur_pred_val = np.zeros((cur_batch_size, NUM_POINT)).astype(np.int32)
             target = target.cpu().data.numpy()
 
-            # Save 8-column data: xyz + normal + gt_label + pred_label
+            # 保存8列数据: xyz + rgb + gt_label + pred_label
             for i in range(cur_batch_size):
                 cat = seg_label_to_cat[target[i, 0]]
                 sample_id = batch_id * args.batch_size + i
                 logits = cur_pred_val_logits[i, :, :]
                 cur_pred_val[i, :] = np.argmax(logits[:, seg_classes[cat]], 1) + seg_classes[cat][0]
 
-                # Get all 7 input columns (xyz + normal + original_label)
-                point_data = points[i].cpu().numpy().transpose(1, 0)  # Shape: (num_point, 7)
-                gt_label = target[i].reshape(-1, 1)  # Shape: (num_point, 1)
-                pred_label = cur_pred_val[i].reshape(-1, 1)  # Shape: (num_point, 1)
+                # 获取输入数据（xyz + 颜色 + 原始标签）
+                point_data = points[i].cpu().numpy().transpose(1, 0)  # 形状: (num_point, 6)
+                gt_label = target[i].reshape(-1, 1)  # 形状: (num_point, 1)
+                pred_label = cur_pred_val[i].reshape(-1, 1)  # 形状: (num_point, 1)
 
-                # Combine into 8 columns
+                # 合并为8列
                 data_to_save = np.hstack([point_data, gt_label, pred_label])
 
-                # Save to file
+                # 保存到文件
                 output_path = os.path.join(output_dir, f'{cat}_{sample_id}.txt')
                 np.savetxt(
                     output_path,
                     data_to_save,
-                    fmt=['%.6f'] * 6 + ['%d', '%d'],  # 6 float + 2 int
-                    header='x y z nx ny nz gt_label pred_label'
+                    fmt=['%.6f'] * 6 + ['%d', '%d'],  # 6个浮点数(xyz+rgb) + 2个整数(标签)
+                    header='x y z r g b gt_label pred_label'  # 法向量改为颜色
                 )
 
-                # 计算每个飞机部件的 IoU
-                if cat == 'Airplane':
+                # 计算复杂岩体每个部件的IoU
+                if cat == 'ComplexRock':
                     segp = cur_pred_val[i, :]
                     segl = target[i, :]
                     for j, l in enumerate(seg_classes[cat]):
@@ -159,17 +155,17 @@ def main(args):
                             part_iou = 1.0
                         else:
                             part_iou = np.sum((segl == l) & (segp == l)) / float(np.sum((segl == l) | (segp == l)))
-                        airplane_part_ious[j] += part_iou
-                        airplane_part_seen[j] += 1
+                        complex_rock_part_ious[j] += part_iou
+                        complex_rock_part_seen[j] += 1
 
-            # Original evaluation logic
+            # 原始评估逻辑
             correct = np.sum(cur_pred_val == target)
             total_correct += correct
             total_seen += (cur_batch_size * NUM_POINT)
 
             for l in range(num_part):
-                total_seen_class[l] += np.sum(target == l)
-                total_correct_class[l] += (np.sum((cur_pred_val == l) & (target == l)))
+                total_seen_class[l] += np.sum(target == l + 1)  # 标签从1开始
+                total_correct_class[l] += (np.sum((cur_pred_val == l + 1) & (target == l + 1)))
 
             for i in range(cur_batch_size):
                 segp = cur_pred_val[i, :]
@@ -184,9 +180,10 @@ def main(args):
                             np.sum((segl == l) | (segp == l)))
                 shape_ious[cat].append(np.mean(part_ious))
 
+        # 计算平均IoU
         for j in range(3):
-            if airplane_part_seen[j] > 0:
-                airplane_part_ious[j] /= airplane_part_seen[j]
+            if complex_rock_part_seen[j] > 0:
+                complex_rock_part_ious[j] /= complex_rock_part_seen[j]
 
         all_shape_ious = []
         for cat in shape_ious.keys():
@@ -206,12 +203,12 @@ def main(args):
     log_string('Class avg accuracy is: %.5f' % test_metrics['class_avg_accuracy'])
     log_string('Class avg mIOU is: %.5f' % test_metrics['class_avg_iou'])
     log_string('Inctance avg mIOU is: %.5f' % test_metrics['inctance_avg_iou'])
-    log_string('Airplane Part 1 IoU is: %.5f' % airplane_part_ious[0])
-    log_string('Airplane Part 2 IoU is: %.5f' % airplane_part_ious[1])
-    log_string('Airplane Part 3 IoU is: %.5f' % airplane_part_ious[2])
+    # 输出复杂岩体各部件IoU
+    log_string('ComplexRock Part 1 IoU is: %.5f' % complex_rock_part_ious[0])
+    log_string('ComplexRock Part 2 IoU is: %.5f' % complex_rock_part_ious[1])
+    log_string('ComplexRock Part 3 IoU is: %.5f' % complex_rock_part_ious[2])
 
 
 if __name__ == '__main__':
     args = parse_args()
     main(args)
-    

@@ -11,17 +11,15 @@ import numpy as np
 
 from pathlib import Path
 from tqdm import tqdm
-from data_utils.ShapeNetDataLoader import PartNormalDataset
+from data_utils.DataLoader import ColoredPointDataset 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
-seg_classes = {'Earphone': [16, 17, 18], 'Motorbike': [30, 31, 32, 33, 34, 35], 'Rocket': [41, 42, 43],
-               'Car': [8, 9, 10, 11], 'Laptop': [28, 29], 'Cap': [6, 7], 'Skateboard': [44, 45, 46], 'Mug': [36, 37],
-               'Guitar': [19, 20, 21], 'Bag': [4, 5], 'Lamp': [24, 25, 26, 27], 'Table': [47, 48, 49],
-               'Airplane': [1, 2, 3], 'Pistol': [38, 39, 40], 'Chair': [12, 13, 14, 15], 'Knife': [22, 23]}
-seg_label_to_cat = {}  # {0:Airplane, 1:Airplane, ...49:Table}
+
+seg_classes = {'ComplexRock': [1, 2, 3]}
+seg_label_to_cat = {}  # {1:ComplexRock, 2:ComplexRock, 3:ComplexRock}
 for cat in seg_classes.keys():
     for label in seg_classes[cat]:
         seg_label_to_cat[label] = cat
@@ -43,7 +41,7 @@ def to_categorical(y, num_classes):
 
 def parse_args():
     parser = argparse.ArgumentParser('Model')
-    parser.add_argument('--model', type=str, default='pointnet_part_seg', help='model name')
+    parser.add_argument('--model', type=str, default='rock_part_seg', help='model name')  # 修改模型名称
     parser.add_argument('--batch_size', type=int, default=16, help='batch Size during training')
     parser.add_argument('--epoch', default=20, type=int, help='epoch to run')
     parser.add_argument('--learning_rate', default=0.001, type=float, help='initial learning rate')
@@ -52,7 +50,7 @@ def parse_args():
     parser.add_argument('--log_dir', type=str, default=None, help='log path')
     parser.add_argument('--decay_rate', type=float, default=1e-4, help='weight decay')
     parser.add_argument('--npoint', type=int, default=2048, help='point Number')
-    parser.add_argument('--normal', action='store_true', default=False, help='use normals')
+    parser.add_argument('--color', action='store_true', default=True, help='use color rgb')  # 法向量改为颜色
     parser.add_argument('--step_size', type=int, default=20, help='decay step for lr decay')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='decay rate for lr decay')
 
@@ -95,24 +93,26 @@ def main(args):
     log_string('PARAMETER ...')
     log_string(args)
 
-    root = 'data/shapenetcore_partanno_segmentation_benchmark_v0_normal/'
+    
+    root = 'data/ComplexRock_dataset/'
 
-    TRAIN_DATASET = PartNormalDataset(root=root, npoints=args.npoint, split='trainval', normal_channel=args.normal)
+    
+    TRAIN_DATASET = ColoredPointDataset(root=root, npoints=args.npoint, split='trainval', color_channel=args.color)
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    TEST_DATASET = PartNormalDataset(root=root, npoints=args.npoint, split='test', normal_channel=args.normal)
+    TEST_DATASET = ColoredPointDataset(root=root, npoints=args.npoint, split='test', color_channel=args.color)
     testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
     log_string("The number of training data is: %d" % len(TRAIN_DATASET))
     log_string("The number of test data is: %d" % len(TEST_DATASET))
 
-    num_classes = 16
-    num_part = 50
+    num_classes = 1 
+    num_part = 3  
 
     '''MODEL LOADING'''
     MODEL = importlib.import_module(args.model)
     shutil.copy('models/%s.py' % args.model, str(exp_dir))
-    shutil.copy('models/pointnet2_utils.py', str(exp_dir))
+    shutil.copy('models/rock_utils.py', str(exp_dir))  
 
-    classifier = MODEL.get_model(num_part, normal_channel=args.normal).cuda()
+    classifier = MODEL.get_model(num_part, color_channel=args.color).cuda()  
     criterion = MODEL.get_loss().cuda()
     classifier.apply(inplace_relu)
 
@@ -163,9 +163,9 @@ def main(args):
     # 新增列表用于存储每个 epoch 的指标
     train_accuracies = []
     test_accuracies = []
-    airplane_mious = []
+    complex_rock_mious = []  
     epoch_times = []
-    airplane_part_ious_list = []
+    complex_rock_part_ious_list = []  
 
     for epoch in range(start_epoch, args.epoch):
         mean_correct = []
@@ -217,7 +217,7 @@ def main(args):
             total_seen_class = [0 for _ in range(num_part)]
             total_correct_class = [0 for _ in range(num_part)]
             shape_ious = {cat: [] for cat in seg_classes.keys()}
-            seg_label_to_cat = {}  # {0:Airplane, 1:Airplane, ...49:Table}
+            seg_label_to_cat = {}  # {1:ComplexRock, 2:ComplexRock, 3:ComplexRock}
 
             for cat in seg_classes.keys():
                 for label in seg_classes[cat]:
@@ -225,8 +225,9 @@ def main(args):
 
             classifier = classifier.eval()
 
-            airplane_part_ious = [0.0, 0.0, 0.0]
-            airplane_part_seen = [0, 0, 0]
+            # 复杂岩体3个部件的IoU跟踪
+            complex_rock_part_ious = [0.0, 0.0, 0.0]
+            complex_rock_part_seen = [0, 0, 0]
 
             for batch_id, (points, label, target) in tqdm(enumerate(testDataLoader), total=len(testDataLoader), smoothing=0.9):
                 cur_batch_size, NUM_POINT, _ = points.size()
@@ -243,39 +244,41 @@ def main(args):
                     logits = cur_pred_val_logits[i, :, :]
                     cur_pred_val[i, :] = np.argmax(logits[:, seg_classes[cat]], 1) + seg_classes[cat][0]
 
-                    correct = np.sum(cur_pred_val[i, :] == target[i, :])
-                    total_correct += correct
-                    total_seen += NUM_POINT
+                correct = np.sum(cur_pred_val == target)
+                total_correct += correct
+                total_seen += (cur_batch_size * NUM_POINT)
 
-                    for l in range(num_part):
-                        total_seen_class[l] += np.sum(target[i, :] == l)
-                        total_correct_class[l] += (np.sum((cur_pred_val[i, :] == l) & (target[i, :] == l)))
+                for l in range(num_part):
+                    total_seen_class[l] += np.sum(target == l + 1)  # 标签从1开始
+                    total_correct_class[l] += (np.sum((cur_pred_val == l + 1) & (target == l + 1)))
 
+                for i in range(cur_batch_size):
                     segp = cur_pred_val[i, :]
                     segl = target[i, :]
                     cat = seg_label_to_cat[segl[0]]
                     part_ious = [0.0 for _ in range(len(seg_classes[cat]))]
                     for l in seg_classes[cat]:
-                        if (np.sum(segl == l) == 0) and (np.sum(segp == l) == 0):  # part is not present, no prediction as well
+                        if (np.sum(segl == l) == 0) and (np.sum(segp == l) == 0):
                             part_ious[l - seg_classes[cat][0]] = 1.0
                         else:
                             part_ious[l - seg_classes[cat][0]] = np.sum((segl == l) & (segp == l)) / float(
                                 np.sum((segl == l) | (segp == l)))
                     shape_ious[cat].append(np.mean(part_ious))
 
-                    if cat == 'Airplane':
+                    # 计算复杂岩体每个部件的IoU
+                    if cat == 'ComplexRock':
                         for j, l in enumerate(seg_classes[cat]):
                             if (np.sum(segl == l) == 0) and (np.sum(segp == l) == 0):
                                 part_iou = 1.0
                             else:
                                 part_iou = np.sum((segl == l) & (segp == l)) / float(np.sum((segl == l) | (segp == l)))
-                            airplane_part_ious[j] += part_iou
-                            airplane_part_seen[j] += 1
+                            complex_rock_part_ious[j] += part_iou
+                            complex_rock_part_seen[j] += 1
 
+            # 计算平均IoU
             for j in range(3):
-                if airplane_part_seen[j] > 0:
-                    airplane_part_ious[j] /= airplane_part_seen[j]
-            airplane_part_ious_list.append(airplane_part_ious)
+                if complex_rock_part_seen[j] > 0:
+                    complex_rock_part_ious[j] /= complex_rock_part_seen[j]
 
             all_shape_ious = []
             for cat in shape_ious.keys():
@@ -291,17 +294,20 @@ def main(args):
             test_metrics['class_avg_iou'] = mean_shape_ious
             test_metrics['inctance_avg_iou'] = np.mean(all_shape_ious)
 
-            test_accuracies.append(test_metrics['accuracy'])
-            airplane_mious.append(shape_ious['Airplane'])
+        log_string('Test accuracy is: %.5f' % test_metrics['accuracy'])
+        log_string('Class avg accuracy is: %.5f' % test_metrics['class_avg_accuracy'])
+        log_string('Class avg mIOU is: %.5f' % test_metrics['class_avg_iou'])
+        log_string('Inctance avg mIOU is: %.5f' % test_metrics['inctance_avg_iou'])
+        # 输出复杂岩体各部件IoU
+        log_string('ComplexRock Part 1 IoU is: %.5f' % complex_rock_part_ious[0])
+        log_string('ComplexRock Part 2 IoU is: %.5f' % complex_rock_part_ious[1])
+        log_string('ComplexRock Part 3 IoU is: %.5f' % complex_rock_part_ious[2])
 
-            log_string('Epoch %d test Accuracy: %f  Class avg mIOU: %f   Inctance avg mIOU: %f' % (
-                epoch + 1, test_metrics['accuracy'], test_metrics['class_avg_iou'], test_metrics['inctance_avg_iou']))
-        end_time = datetime.datetime.now()
-        epoch_time = (end_time - start_time).total_seconds()
-        epoch_times.append(epoch_time)
-
-        if (test_metrics['inctance_avg_iou'] >= best_inctance_avg_iou):
-            logger.info('Save model...')
+        # 保存最佳模型
+        if test_metrics['inctance_avg_iou'] >= best_inctance_avg_iou:
+            best_inctance_avg_iou = test_metrics['inctance_avg_iou']
+            best_class_avg_iou = test_metrics['class_avg_iou']
+            best_acc = test_metrics['accuracy']
             savepath = str(checkpoints_dir) + '/best_model.pth'
             log_string('Saving at %s' % savepath)
             state = {
@@ -314,34 +320,8 @@ def main(args):
                 'optimizer_state_dict': optimizer.state_dict(),
             }
             torch.save(state, savepath)
-            log_string('Saving model....')
-
-        if test_metrics['accuracy'] > best_acc:
-            best_acc = test_metrics['accuracy']
-        if test_metrics['class_avg_iou'] > best_class_avg_iou:
-            best_class_avg_iou = test_metrics['class_avg_iou']
-        if test_metrics['inctance_avg_iou'] > best_inctance_avg_iou:
-            best_inctance_avg_iou = test_metrics['inctance_avg_iou']
-        log_string('Best accuracy is: %.5f' % best_acc)
-        log_string('Best class avg mIOU is: %.5f' % best_class_avg_iou)
-        log_string('Best inctance avg mIOU is: %.5f' % best_inctance_avg_iou)
         global_epoch += 1
 
-    # 训练结束后，打印每个 epoch 的统计信息
-    log_string("Epoch\tTrain Accuracy\tTest Accuracy\tAirplane mIoU\tAirplane Part 1 IoU\tAirplane Part 2 IoU\tAirplane Part 3 IoU\tEpoch Time (seconds)")
-    for i in range(len(train_accuracies)):
-        airplane_part_ious = airplane_part_ious_list[i]
-        log_string(f"{i + 1}\t{train_accuracies[i]:.5f}\t{test_accuracies[i]:.5f}\t{airplane_mious[i]:.5f}\t{airplane_part_ious[0]:.5f}\t{airplane_part_ious[1]:.5f}\t{airplane_part_ious[2]:.5f}\t{epoch_times[i]:.2f}")
-
-    log_string('Accuracy is: %.5f' % test_metrics['accuracy'])
-    log_string('Class avg accuracy is: %.5f' % test_metrics['class_avg_accuracy'])
-    log_string('Class avg mIOU is: %.5f' % test_metrics['class_avg_iou'])
-    log_string('Inctance avg mIOU is: %.5f' % test_metrics['inctance_avg_iou'])
-    log_string('Airplane Part 1 IoU is: %.5f' % airplane_part_ious[0])
-    log_string('Airplane Part 2 IoU is: %.5f' % airplane_part_ious[1])
-    log_string('Airplane Part 3 IoU is: %.5f' % airplane_part_ious[2])
-
-
-if __name__ == '__main__':
-    args = parse_args()
-    main(args)    
+    log_string('Best accuracy is: %.5f' % best_acc)
+    log_string('Best class avg mIOU is: %.5f' % best_class_avg_iou)
+    log_string('Best inctance avg mIOU is: %.5f' % best_inctance_avg_iou)
