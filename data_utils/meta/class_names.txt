@@ -1,3 +1,0 @@
-traces
-planes
-non-discontinuities
