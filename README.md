@@ -19,3 +19,5 @@ python test_partseg.py --log_dir rock_part_seg_msg
 https://github.com/charlesq34/pointnet
 
 https://github.com/charlesq34/pointnet2
+
+https://github.com/yanx27/Pointnet_Pointnet2_pytorch
