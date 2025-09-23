@@ -160,7 +160,7 @@ def main(args):
     best_class_avg_iou = 0
     best_inctance_avg_iou = 0
 
-    # 新增列表用于存储每个 epoch 的指标
+
     train_accuracies = []
     test_accuracies = []
     complex_rock_mious = []  
@@ -225,7 +225,7 @@ def main(args):
 
             classifier = classifier.eval()
 
-            # 复杂岩体3个部件的IoU跟踪
+          
             complex_rock_part_ious = [0.0, 0.0, 0.0]
             complex_rock_part_seen = [0, 0, 0]
 
@@ -265,7 +265,7 @@ def main(args):
                                 np.sum((segl == l) | (segp == l)))
                     shape_ious[cat].append(np.mean(part_ious))
 
-                    # 计算复杂岩体每个部件的IoU
+               
                     if cat == 'ComplexRock':
                         for j, l in enumerate(seg_classes[cat]):
                             if (np.sum(segl == l) == 0) and (np.sum(segp == l) == 0):
@@ -275,7 +275,7 @@ def main(args):
                             complex_rock_part_ious[j] += part_iou
                             complex_rock_part_seen[j] += 1
 
-            # 计算平均IoU
+         
             for j in range(3):
                 if complex_rock_part_seen[j] > 0:
                     complex_rock_part_ious[j] /= complex_rock_part_seen[j]
@@ -298,12 +298,12 @@ def main(args):
         log_string('Class avg accuracy is: %.5f' % test_metrics['class_avg_accuracy'])
         log_string('Class avg mIOU is: %.5f' % test_metrics['class_avg_iou'])
         log_string('Inctance avg mIOU is: %.5f' % test_metrics['inctance_avg_iou'])
-        # 输出复杂岩体各部件IoU
+
         log_string('ComplexRock Part 1 IoU is: %.5f' % complex_rock_part_ious[0])
         log_string('ComplexRock Part 2 IoU is: %.5f' % complex_rock_part_ious[1])
         log_string('ComplexRock Part 3 IoU is: %.5f' % complex_rock_part_ious[2])
 
-        # 保存最佳模型
+ 
         if test_metrics['inctance_avg_iou'] >= best_inctance_avg_iou:
             best_inctance_avg_iou = test_metrics['inctance_avg_iou']
             best_class_avg_iou = test_metrics['class_avg_iou']
