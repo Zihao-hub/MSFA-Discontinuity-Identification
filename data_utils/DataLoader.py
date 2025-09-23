@@ -42,7 +42,7 @@ class ColoredPointDataset(Dataset):
         self.cat = {k: v for k, v in self.cat.items() if k in class_choice}
 
         self.meta = {}
-        # 加载训练/测试划分文件
+
         with open(os.path.join(self.root, 'train_test_split', 'shuffled_train_file_list.json'), 'r') as f:
             train_ids = set([str(d.split('/')[2]) for d in json.load(f)])
         with open(os.path.join(self.root, 'train_test_split', 'shuffled_val_file_list.json'), 'r') as f:
@@ -99,10 +99,10 @@ class ColoredPointDataset(Dataset):
             seg = data[:, -1].astype(np.int32)
             if len(self.cache) < self.cache_size:
                 self.cache[index] = (point_set, cls, seg)
-        # 归一化坐标
+      
         point_set[:, 0:3] = pc_normalize(point_set[:, 0:3])
 
-        # 随机采样固定数量的点
+       
         choice = np.random.choice(len(seg), self.npoints, replace=True)
         point_set = point_set[choice, :]
         seg = seg[choice]
