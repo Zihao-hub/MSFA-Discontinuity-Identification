@@ -9,7 +9,7 @@ def timeit(tag, t):
     return time()
 
 def pc_normalize(pc):
-    """复杂岩体点云坐标归一化处理"""
+
     l = pc.shape[0]
     centroid = np.mean(pc, axis=0)
     pc = pc - centroid
@@ -18,14 +18,7 @@ def pc_normalize(pc):
     return pc
 
 def square_distance(src, dst):
-    """
-    计算两点之间的欧氏距离平方
-    Input:
-        src: 源点云, [B, N, C]
-        dst: 目标点云, [B, M, C]
-    Output:
-        dist: 点之间的平方距离, [B, N, M]
-    """
+
     B, N, _ = src.shape
     _, M, _ = dst.shape
     dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
@@ -35,14 +28,7 @@ def square_distance(src, dst):
 
 
 def index_points(points, idx):
-    """
-    根据索引获取点云数据
-    Input:
-        points: 输入点云数据, [B, N, C]（包含坐标和RGB颜色）
-        idx: 采样索引数据, [B, S]
-    Return:
-        new_points: 索引后的点云数据, [B, S, C]
-    """
+
     device = points.device
     B = points.shape[0]
     view_shape = list(idx.shape)
@@ -55,14 +41,7 @@ def index_points(points, idx):
 
 
 def farthest_point_sample(xyz, npoint):
-    """
-    最远点采样算法
-    Input:
-        xyz: 点云坐标数据, [B, N, 3]
-        npoint: 采样点数
-    Return:
-        centroids: 采样点的索引, [B, npoint]
-    """
+
     device = xyz.device
     B, N, C = xyz.shape
     centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
@@ -80,16 +59,7 @@ def farthest_point_sample(xyz, npoint):
 
 
 def query_ball_point(radius, nsample, xyz, new_xyz):
-    """
-    球查询算法，在指定半径内查询点
-    Input:
-        radius: 局部区域半径
-        nsample: 局部区域最大采样数
-        xyz: 所有点坐标, [B, N, 3]
-        new_xyz: 查询点坐标, [B, S, 3]
-    Return:
-        group_idx: 分组点的索引, [B, S, nsample]
-    """
+
     device = xyz.device
     B, N, C = xyz.shape
     _, S, _ = new_xyz.shape
@@ -104,18 +74,7 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
 
 
 def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
-    """
-    采样并分组点云（包含RGB颜色信息）
-    Input:
-        npoint: 采样点数
-        radius: 分组半径
-        nsample: 每组最大点数
-        xyz: 点云位置数据, [B, N, 3]
-        points: 点云特征数据（包含RGB）, [B, N, D]
-    Return:
-        new_xyz: 采样点位置, [B, npoint, nsample, 3]
-        new_points: 采样点特征, [B, npoint, nsample, 3+D]
-    """
+
     B, N, C = xyz.shape
     S = npoint
     fps_idx = farthest_point_sample(xyz, npoint) # [B, npoint, C]
@@ -136,15 +95,7 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
 
 
 def sample_and_group_all(xyz, points):
-    """
-    将所有点作为一组（包含RGB颜色信息）
-    Input:
-        xyz: 点云位置数据, [B, N, 3]
-        points: 点云特征数据（包含RGB）, [B, N, D]
-    Return:
-        new_xyz: 采样点位置, [B, 1, 3]
-        new_points: 采样点特征, [B, 1, N, 3+D]
-    """
+
     device = xyz.device
     B, N, C = xyz.shape
     new_xyz = torch.zeros(B, 1, C).to(device)
@@ -157,7 +108,7 @@ def sample_and_group_all(xyz, points):
 
 
 class PointNetSetAbstraction(nn.Module):
-    """点云集合抽象层（适用于复杂岩体）"""
+
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
         super(PointNetSetAbstraction, self).__init__()
         self.npoint = npoint
@@ -173,14 +124,7 @@ class PointNetSetAbstraction(nn.Module):
         self.group_all = group_all
 
     def forward(self, xyz, points):
-        """
-        Input:
-            xyz: 点云位置数据, [B, C, N]
-            points: 点云特征数据（包含RGB）, [B, D, N]
-        Return:
-            new_xyz: 采样点位置, [B, C, S]
-            new_points_concat: 采样点特征, [B, D', S]
-        """
+
         xyz = xyz.permute(0, 2, 1)
         if points is not None:
             points = points.permute(0, 2, 1)
@@ -189,8 +133,7 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz, new_points = sample_and_group_all(xyz, points)
         else:
             new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
-        # new_xyz: 采样点位置数据, [B, npoint, C]
-        # new_points: 采样点特征数据, [B, npoint, nsample, C+D]
+
         new_points = new_points.permute(0, 3, 2, 1) # [B, C+D, nsample, npoint]
         for i, conv in enumerate(self.mlp_convs):
             bn = self.mlp_bns[i]
@@ -202,7 +145,7 @@ class PointNetSetAbstraction(nn.Module):
 
 
 class RockPointSetAbstractionMsg(nn.Module):
-    """多尺度点云集合抽象层（适用于复杂岩体）"""
+
     def __init__(self, npoint, radius_list, nsample_list, in_channel, mlp_list):
         super(RockPointSetAbstractionMsg, self).__init__()
         self.npoint = npoint
@@ -213,7 +156,7 @@ class RockPointSetAbstractionMsg(nn.Module):
         for i in range(len(mlp_list)):
             convs = nn.ModuleList()
             bns = nn.ModuleList()
-            last_channel = in_channel + 3  # 3个坐标通道
+            last_channel = in_channel + 3 
             for out_channel in mlp_list[i]:
                 convs.append(nn.Conv2d(last_channel, out_channel, 1))
                 bns.append(nn.BatchNorm2d(out_channel))
@@ -222,14 +165,7 @@ class RockPointSetAbstractionMsg(nn.Module):
             self.bn_blocks.append(bns)
 
     def forward(self, xyz, points):
-        """
-        Input:
-            xyz: 点云位置数据, [B, C, N]
-            points: 点云特征数据（包含RGB）, [B, D, N]
-        Return:
-            new_xyz: 采样点位置, [B, C, S]
-            new_points_concat: 采样点特征, [B, D', S]
-        """
+
         xyz = xyz.permute(0, 2, 1)
         if points is not None:
             points = points.permute(0, 2, 1)
@@ -263,7 +199,7 @@ class RockPointSetAbstractionMsg(nn.Module):
 
 
 class RockFeaturePropagation(nn.Module):
-    """点云特征传播层（适用于复杂岩体）"""
+
     def __init__(self, in_channel, mlp):
         super(RockFeaturePropagation, self).__init__()
         self.mlp_convs = nn.ModuleList()
@@ -275,15 +211,7 @@ class RockFeaturePropagation(nn.Module):
             last_channel = out_channel
 
     def forward(self, xyz1, xyz2, points1, points2):
-        """
-        Input:
-            xyz1: 输入点位置, [B, C, N]
-            xyz2: 采样点位置, [B, C, S]
-            points1: 输入点特征（包含RGB）, [B, D, N]
-            points2: 采样点特征, [B, D, S]
-        Return:
-            new_points: 上采样后的点特征, [B, D', N]
-        """
+
         xyz1 = xyz1.permute(0, 2, 1)
         xyz2 = xyz2.permute(0, 2, 1)
 
