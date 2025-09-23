@@ -343,7 +343,7 @@ if __name__ == "__main__":
  
     t = time()
     pred, _ = model(xyz, cls_label)
-    t = timeit("前向传播", t)
+    t = timeit("Forward Propagation", t)
 
 
     target = torch.randint(0, num_classes, (batch_size, num_points))
@@ -354,8 +354,8 @@ if __name__ == "__main__":
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    t = timeit("反向传播和优化", t)
+    t = timeit("Backpropagation and Optimization", t)
 
-    print(f"损失值: {loss.item()}")
-    print(f"预测输出形状: {pred.shape}")  # 应为 [batch_size, num_points, num_classes]
+    print(f"Loss Value: {loss.item()}")
+    print(f"Predicted Output Shape: {pred.shape}")  
     
