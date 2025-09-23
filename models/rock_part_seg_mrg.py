@@ -111,7 +111,7 @@ def sample_and_group_all(xyz, points):
 
 
 class PointNetSetAbstraction(nn.Module):
-    """点云集合抽象层"""
+
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
         super(PointNetSetAbstraction, self).__init__()
         self.npoint = npoint
@@ -148,7 +148,7 @@ class PointNetSetAbstraction(nn.Module):
 
 
 class PointNetSetAbstractionMRG(nn.Module):
-    """多尺度点云集合抽象层"""
+   
     def __init__(self, npoint, radius_list, nsample_list, in_channel, mlp_list):
         super(PointNetSetAbstractionMRG, self).__init__()
         self.npoint = npoint
@@ -159,7 +159,7 @@ class PointNetSetAbstractionMRG(nn.Module):
         for i in range(len(mlp_list)):
             convs = nn.ModuleList()
             bns = nn.ModuleList()
-            last_channel = in_channel + 3  # 3个坐标通道
+            last_channel = in_channel + 3  
             for out_channel in mlp_list[i]:
                 convs.append(nn.Conv2d(last_channel, out_channel, 1))
                 bns.append(nn.BatchNorm2d(out_channel))
@@ -203,7 +203,7 @@ class PointNetSetAbstractionMRG(nn.Module):
 
 
 class PointNetFeaturePropagation(nn.Module):
-    """点云特征传播层"""
+
     def __init__(self, in_channel, mlp):
         super(PointNetFeaturePropagation, self).__init__()
         self.mlp_convs = nn.ModuleList()
@@ -249,39 +249,39 @@ class PointNetFeaturePropagation(nn.Module):
 
 
 class get_model(nn.Module):
-    """复杂岩体部件分割模型"""
-    def __init__(self, num_classes=3, color_channel=True):  # 默认为3个部件，使用颜色通道
+   
+    def __init__(self, num_classes=3, color_channel=True): 
         super(get_model, self).__init__()
         if color_channel:
-            additional_channel = 3  # 颜色通道数(RGB)
+            additional_channel = 3  
         else:
             additional_channel = 0
-        self.color_channel = color_channel  # 记录是否使用颜色通道
+        self.color_channel = color_channel  
         
-        # 集合抽象层 (多尺度)
+    
         self.sa1 = PointNetSetAbstractionMRG(512, [0.02, 0.05, 0.1], [320, 640, 1280], 
-                                             3 + additional_channel,  # 3个坐标通道 + 颜色通道
+                                             3 + additional_channel, 
                                              [[32, 32, 64], [64, 64, 128], [64, 96, 128]])
         self.sa2 = PointNetSetAbstractionMRG(128, [0.5, 1], [64, 128], 
-                                             128 + 128 + 64,  # 上一层输出特征总和
+                                             128 + 128 + 64,  
                                              [[128, 128, 256], [128, 196, 256]])
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, 
-                                         in_channel=512 + 3,  # 特征 + 坐标
+                                         in_channel=512 + 3,  
                                          mlp=[256, 512, 1024], group_all=True)
         
-        # 特征传播层
+  
         self.fp3 = PointNetFeaturePropagation(in_channel=1536, mlp=[256, 256])
         self.fp2 = PointNetFeaturePropagation(in_channel=576, mlp=[256, 128])
         self.fp1 = PointNetFeaturePropagation(in_channel=150 + additional_channel, mlp=[128, 128])
         
-        # 最终卷积层
+     
         self.conv1 = nn.Conv1d(128, 128, 1)
         self.bn1 = nn.BatchNorm1d(128)
         self.drop1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(128, num_classes, 1)  
 
     def forward(self, xyz, cls_label):
-        # 集合抽象层
+
         B, C, N = xyz.shape
         if self.color_channel:
             l0_points = xyz  
@@ -294,17 +294,17 @@ class get_model(nn.Module):
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
         
-        # 特征传播层
+  
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
         
-        # 类别标签one-hot编码 (仅1个类别：复杂岩体)
+    
         cls_label_one_hot = cls_label.view(B, 1, 1).repeat(1, 1, N)
         l0_points = self.fp1(l0_xyz, l1_xyz, 
                            torch.cat([cls_label_one_hot, l0_xyz, l0_points], 1), 
                            l1_points)
         
-        # 卷积层
+
         feat = F.relu(self.bn1(self.conv1(l0_points)))
         x = self.drop1(feat)
         x = self.conv2(x)
@@ -314,7 +314,7 @@ class get_model(nn.Module):
 
 
 class get_loss(nn.Module):
-    """损失函数定义"""
+ 
     def __init__(self):
         super(get_loss, self).__init__()
 
@@ -323,33 +323,33 @@ class get_loss(nn.Module):
         return total_loss
 
 
-# 模型测试
+
 if __name__ == "__main__":
-    num_classes = 3  # 复杂岩体3个部件
-    color_channel = True  # 使用RGB颜色
+    num_classes = 3  
+    color_channel = True  
     batch_size = 8
     num_points = 1024
 
-    # 初始化模型和优化器
+ 
     model = get_model(num_classes, color_channel)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     if color_channel:
-        xyz = torch.rand(batch_size, 6, num_points)  # 3坐标 + 3颜色
+        xyz = torch.rand(batch_size, 6, num_points)  
     else:
-        xyz = torch.rand(batch_size, 3, num_points)  # 仅3坐标
+        xyz = torch.rand(batch_size, 3, num_points)  
     cls_label = torch.zeros(batch_size, 1) 
 
-    # 前向传播测试
+ 
     t = time()
     pred, _ = model(xyz, cls_label)
     t = timeit("前向传播", t)
 
-    # 计算损失
+
     target = torch.randint(0, num_classes, (batch_size, num_points))
     loss = get_loss()(pred, target)
 
-    # 反向传播和优化
+ 
     t = time()
     optimizer.zero_grad()
     loss.backward()
