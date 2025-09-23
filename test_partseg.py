@@ -66,7 +66,7 @@ def main(args):
  
     root = 'data/ComplexRock_dataset/'
 
-    # 加载测试数据集
+
     TEST_DATASET = ColoredPointDataset(root=root, npoints=args.num_point, split='test', color_channel=args.color)
     testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=4)
     log_string("The number of test data is: %d" % len(TEST_DATASET))
@@ -101,7 +101,7 @@ def main(args):
                 seg_label_to_cat[label] = cat
 
         classifier = classifier.eval()
-        # 跟踪复杂岩体各部件IoU
+ 
         complex_rock_part_ious = [0.0, 0.0, 0.0]
         complex_rock_part_seen = [0, 0, 0]
 
@@ -122,31 +122,31 @@ def main(args):
             cur_pred_val = np.zeros((cur_batch_size, NUM_POINT)).astype(np.int32)
             target = target.cpu().data.numpy()
 
-            # 保存8列数据: xyz + rgb + gt_label + pred_label
+         
             for i in range(cur_batch_size):
                 cat = seg_label_to_cat[target[i, 0]]
                 sample_id = batch_id * args.batch_size + i
                 logits = cur_pred_val_logits[i, :, :]
                 cur_pred_val[i, :] = np.argmax(logits[:, seg_classes[cat]], 1) + seg_classes[cat][0]
 
-                # 获取输入数据（xyz + 颜色 + 原始标签）
-                point_data = points[i].cpu().numpy().transpose(1, 0)  # 形状: (num_point, 6)
-                gt_label = target[i].reshape(-1, 1)  # 形状: (num_point, 1)
-                pred_label = cur_pred_val[i].reshape(-1, 1)  # 形状: (num_point, 1)
+      
+                point_data = points[i].cpu().numpy().transpose(1, 0)  
+                gt_label = target[i].reshape(-1, 1)  
+                pred_label = cur_pred_val[i].reshape(-1, 1)  
 
-                # 合并为8列
+      
                 data_to_save = np.hstack([point_data, gt_label, pred_label])
 
-                # 保存到文件
+         
                 output_path = os.path.join(output_dir, f'{cat}_{sample_id}.txt')
                 np.savetxt(
                     output_path,
                     data_to_save,
-                    fmt=['%.6f'] * 6 + ['%d', '%d'],  # 6个浮点数(xyz+rgb) + 2个整数(标签)
-                    header='x y z r g b gt_label pred_label'  # 法向量改为颜色
+                    fmt=['%.6f'] * 6 + ['%d', '%d'],  
+                    header='x y z r g b gt_label pred_label'  
                 )
 
-                # 计算复杂岩体每个部件的IoU
+           
                 if cat == 'ComplexRock':
                     segp = cur_pred_val[i, :]
                     segl = target[i, :]
@@ -158,13 +158,13 @@ def main(args):
                         complex_rock_part_ious[j] += part_iou
                         complex_rock_part_seen[j] += 1
 
-            # 原始评估逻辑
+      
             correct = np.sum(cur_pred_val == target)
             total_correct += correct
             total_seen += (cur_batch_size * NUM_POINT)
 
             for l in range(num_part):
-                total_seen_class[l] += np.sum(target == l + 1)  # 标签从1开始
+                total_seen_class[l] += np.sum(target == l + 1)  
                 total_correct_class[l] += (np.sum((cur_pred_val == l + 1) & (target == l + 1)))
 
             for i in range(cur_batch_size):
@@ -180,7 +180,7 @@ def main(args):
                             np.sum((segl == l) | (segp == l)))
                 shape_ious[cat].append(np.mean(part_ious))
 
-        # 计算平均IoU
+       
         for j in range(3):
             if complex_rock_part_seen[j] > 0:
                 complex_rock_part_ious[j] /= complex_rock_part_seen[j]
@@ -203,7 +203,7 @@ def main(args):
     log_string('Class avg accuracy is: %.5f' % test_metrics['class_avg_accuracy'])
     log_string('Class avg mIOU is: %.5f' % test_metrics['class_avg_iou'])
     log_string('Inctance avg mIOU is: %.5f' % test_metrics['inctance_avg_iou'])
-    # 输出复杂岩体各部件IoU
+ 
     log_string('ComplexRock Part 1 IoU is: %.5f' % complex_rock_part_ious[0])
     log_string('ComplexRock Part 2 IoU is: %.5f' % complex_rock_part_ious[1])
     log_string('ComplexRock Part 3 IoU is: %.5f' % complex_rock_part_ious[2])
