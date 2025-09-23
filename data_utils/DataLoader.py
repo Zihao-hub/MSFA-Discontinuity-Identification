@@ -1,4 +1,4 @@
-# *_*coding:utf-8 *_*
+
 import os
 import json
 import warnings
