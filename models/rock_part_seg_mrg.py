@@ -11,27 +11,47 @@ def timeit(tag, t):
 
 
 def pc_normalize(pc):
-
     l = pc.shape[0]
     centroid = np.mean(pc, axis=0)
     pc = pc - centroid
-    m = np.max(np.sqrt(np.sum(pc **2, axis=1)))
+    m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
     pc = pc / m
     return pc
 
 
 def square_distance(src, dst):
-    
+    """
+    Calculate Euclid distance between each two points.
+
+    src^T * dst = xn * xm + yn * ym + zn * zm；
+    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
+    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
+    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
+         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
+
+    Input:
+        src: source points, [B, N, C]
+        dst: target points, [B, M, C]
+    Output:
+        dist: per-point square distance, [B, N, M]
+    """
     B, N, _ = src.shape
     _, M, _ = dst.shape
     dist = -2 * torch.matmul(src, dst.permute(0, 2, 1))
-    dist += torch.sum(src** 2, -1).view(B, N, 1)
-    dist += torch.sum(dst **2, -1).view(B, 1, M)
+    dist += torch.sum(src ** 2, -1).view(B, N, 1)
+    dist += torch.sum(dst ** 2, -1).view(B, 1, M)
     return dist
 
 
 def index_points(points, idx):
-  
+    """
+
+    Input:
+        points: input points data, [B, N, C]
+        idx: sample index data, [B, S]
+    Return:
+        new_points:, indexed points data, [B, S, C]
+    """
     device = points.device
     B = points.shape[0]
     view_shape = list(idx.shape)
@@ -44,7 +64,13 @@ def index_points(points, idx):
 
 
 def farthest_point_sample(xyz, npoint):
- 
+    """
+    Input:
+        xyz: pointcloud data, [B, N, 3]
+        npoint: number of samples
+    Return:
+        centroids: sampled pointcloud index, [B, npoint]
+    """
     device = xyz.device
     B, N, C = xyz.shape
     centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
@@ -54,7 +80,7 @@ def farthest_point_sample(xyz, npoint):
     for i in range(npoint):
         centroids[:, i] = farthest
         centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) **2, -1)
+        dist = torch.sum((xyz - centroid) ** 2, -1)
         mask = dist < distance
         distance[mask] = dist[mask]
         farthest = torch.max(distance, -1)[1]
@@ -62,13 +88,21 @@ def farthest_point_sample(xyz, npoint):
 
 
 def query_ball_point(radius, nsample, xyz, new_xyz):
-   
+    """
+    Input:
+        radius: local region radius
+        nsample: max sample number in local region
+        xyz: all points, [B, N, 3]
+        new_xyz: query points, [B, S, 3]
+    Return:
+        group_idx: grouped points index, [B, S, nsample]
+    """
     device = xyz.device
     B, N, C = xyz.shape
     _, S, _ = new_xyz.shape
     group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
     sqrdists = square_distance(new_xyz, xyz)
-    group_idx[sqrdists > radius** 2] = N
+    group_idx[sqrdists > radius ** 2] = N
     group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
     group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
     mask = group_idx == N
@@ -77,7 +111,17 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
 
 
 def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
-  
+    """
+    Input:
+        npoint:
+        radius:
+        nsample:
+        xyz: input points position data, [B, N, 3]
+        points: input points data, [B, N, D]
+    Return:
+        new_xyz: sampled points position data, [B, npoint, nsample, 3]
+        new_points: sampled points data, [B, npoint, nsample, 3+D]
+    """
     B, N, C = xyz.shape
     S = npoint
     fps_idx = farthest_point_sample(xyz, npoint)  # [B, npoint, C]
@@ -98,7 +142,14 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False):
 
 
 def sample_and_group_all(xyz, points):
-   
+    """
+    Input:
+        xyz: input points position data, [B, N, 3]
+        points: input points data, [B, N, D]
+    Return:
+        new_xyz: sampled points position data, [B, 1, 3]
+        new_points: sampled points data, [B, 1, N, 3+D]
+    """
     device = xyz.device
     B, N, C = xyz.shape
     new_xyz = torch.zeros(B, 1, C).to(device)
@@ -111,7 +162,6 @@ def sample_and_group_all(xyz, points):
 
 
 class PointNetSetAbstraction(nn.Module):
-
     def __init__(self, npoint, radius, nsample, in_channel, mlp, group_all):
         super(PointNetSetAbstraction, self).__init__()
         self.npoint = npoint
@@ -127,7 +177,14 @@ class PointNetSetAbstraction(nn.Module):
         self.group_all = group_all
 
     def forward(self, xyz, points):
-      
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
         xyz = xyz.permute(0, 2, 1)
         if points is not None:
             points = points.permute(0, 2, 1)
@@ -136,8 +193,9 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz, new_points = sample_and_group_all(xyz, points)
         else:
             new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points)
-        
-        new_points = new_points.permute(0, 3, 2, 1)  # [B, C+D, nsample, npoint]
+        # new_xyz: sampled points position data, [B, npoint, C]
+        # new_points: sampled points data, [B, npoint, nsample, C+D]
+        new_points = new_points.permute(0, 3, 2, 1)  # [B, C+D, nsample,npoint]
         for i, conv in enumerate(self.mlp_convs):
             bn = self.mlp_bns[i]
             new_points = F.relu(bn(conv(new_points)))
@@ -148,7 +206,6 @@ class PointNetSetAbstraction(nn.Module):
 
 
 class PointNetSetAbstractionMRG(nn.Module):
-   
     def __init__(self, npoint, radius_list, nsample_list, in_channel, mlp_list):
         super(PointNetSetAbstractionMRG, self).__init__()
         self.npoint = npoint
@@ -159,7 +216,7 @@ class PointNetSetAbstractionMRG(nn.Module):
         for i in range(len(mlp_list)):
             convs = nn.ModuleList()
             bns = nn.ModuleList()
-            last_channel = in_channel + 3  
+            last_channel = in_channel + 3
             for out_channel in mlp_list[i]:
                 convs.append(nn.Conv2d(last_channel, out_channel, 1))
                 bns.append(nn.BatchNorm2d(out_channel))
@@ -176,13 +233,11 @@ class PointNetSetAbstractionMRG(nn.Module):
         S = self.npoint
         new_xyz = index_points(xyz, farthest_point_sample(xyz, S))
         new_points_list = []
-        
         for i, radius in enumerate(self.radius_list):
             K = self.nsample_list[i]
             group_idx = query_ball_point(radius, K, xyz, new_xyz)
             grouped_xyz = index_points(xyz, group_idx)
             grouped_xyz -= new_xyz.view(B, S, 1, C)
-            
             if points is not None:
                 grouped_points = index_points(points, group_idx)
                 grouped_points = torch.cat([grouped_points, grouped_xyz], dim=-1)
@@ -203,7 +258,6 @@ class PointNetSetAbstractionMRG(nn.Module):
 
 
 class PointNetFeaturePropagation(nn.Module):
-
     def __init__(self, in_channel, mlp):
         super(PointNetFeaturePropagation, self).__init__()
         self.mlp_convs = nn.ModuleList()
@@ -215,7 +269,15 @@ class PointNetFeaturePropagation(nn.Module):
             last_channel = out_channel
 
     def forward(self, xyz1, xyz2, points1, points2):
-  
+        """
+        Input:
+            xyz1: input points position data, [B, C, N]
+            xyz2: sampled input points position data, [B, C, S]
+            points1: input points data, [B, D, N]
+            points2: input points data, [B, D, S]
+        Return:
+            new_points: upsampled points data, [B, D', N]
+        """
         xyz1 = xyz1.permute(0, 2, 1)
         xyz2 = xyz2.permute(0, 2, 1)
 
@@ -249,62 +311,45 @@ class PointNetFeaturePropagation(nn.Module):
 
 
 class get_model(nn.Module):
-   
-    def __init__(self, num_classes=3, color_channel=True): 
+    def __init__(self, num_classes, normal_channel=False):
         super(get_model, self).__init__()
-        if color_channel:
-            additional_channel = 3  
+        if normal_channel:
+            additional_channel = 3
         else:
             additional_channel = 0
-        self.color_channel = color_channel  
-        
-    
-        self.sa1 = PointNetSetAbstractionMRG(512, [0.02, 0.05, 0.1], [320, 640, 1280], 
-                                             3 + additional_channel, 
+        self.normal_channel = normal_channel
+        self.sa1 = PointNetSetAbstractionMRG(512, [0.1, 0.2, 0.4], [128, 256, 512], 3 + additional_channel,
                                              [[32, 32, 64], [64, 64, 128], [64, 96, 128]])
-        self.sa2 = PointNetSetAbstractionMRG(128, [0.5, 1], [64, 128], 
-                                             128 + 128 + 64,  
+        self.sa2 = PointNetSetAbstractionMRG(128, [0.4, 0.8], [64, 128], 128 + 128 + 64,
                                              [[128, 128, 256], [128, 196, 256]])
-        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, 
-                                         in_channel=512 + 3,  
-                                         mlp=[256, 512, 1024], group_all=True)
-        
-  
+        self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=512 + 3,
+                                          mlp=[256, 512, 1024], group_all=True)
         self.fp3 = PointNetFeaturePropagation(in_channel=1536, mlp=[256, 256])
         self.fp2 = PointNetFeaturePropagation(in_channel=576, mlp=[256, 128])
         self.fp1 = PointNetFeaturePropagation(in_channel=150 + additional_channel, mlp=[128, 128])
-        
-     
         self.conv1 = nn.Conv1d(128, 128, 1)
         self.bn1 = nn.BatchNorm1d(128)
         self.drop1 = nn.Dropout(0.5)
-        self.conv2 = nn.Conv1d(128, num_classes, 1)  
+        self.conv2 = nn.Conv1d(128, num_classes, 1)
 
     def forward(self, xyz, cls_label):
-
+        # Set Abstraction layers
         B, C, N = xyz.shape
-        if self.color_channel:
-            l0_points = xyz  
-            l0_xyz = xyz[:, :3, :] 
+        if self.normal_channel:
+            l0_points = xyz
+            l0_xyz = xyz[:, :3, :]
         else:
             l0_points = xyz
             l0_xyz = xyz
-            
         l1_xyz, l1_points = self.sa1(l0_xyz, l0_points)
         l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
         l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
-        
-  
+        # Feature Propagation layers
         l2_points = self.fp3(l2_xyz, l3_xyz, l2_points, l3_points)
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)
-        
-    
-        cls_label_one_hot = cls_label.view(B, 1, 1).repeat(1, 1, N)
-        l0_points = self.fp1(l0_xyz, l1_xyz, 
-                           torch.cat([cls_label_one_hot, l0_xyz, l0_points], 1), 
-                           l1_points)
-        
-
+        cls_label_one_hot = cls_label.view(B, 16, 1).repeat(1, 1, N)
+        l0_points = self.fp1(l0_xyz, l1_xyz, torch.cat([cls_label_one_hot, l0_xyz, l0_points], 1), l1_points)
+        # FC layers
         feat = F.relu(self.bn1(self.conv1(l0_points)))
         x = self.drop1(feat)
         x = self.conv2(x)
@@ -314,48 +359,44 @@ class get_model(nn.Module):
 
 
 class get_loss(nn.Module):
- 
     def __init__(self):
         super(get_loss, self).__init__()
 
-    def forward(self, pred, target, trans_feat=None):
+    def forward(self, pred, target, trans_feat):
         total_loss = F.nll_loss(pred, target)
+
         return total_loss
 
 
-
+# 模拟数据进行测试
 if __name__ == "__main__":
-    num_classes = 3  
-    color_channel = True  
+    num_classes = 50
+    normal_channel = False
     batch_size = 8
     num_points = 1024
 
- 
-    model = get_model(num_classes, color_channel)
+    model = get_model(num_classes, normal_channel)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    if color_channel:
-        xyz = torch.rand(batch_size, 6, num_points)  
-    else:
-        xyz = torch.rand(batch_size, 3, num_points)  
-    cls_label = torch.zeros(batch_size, 1) 
+    # 模拟输入数据
+    xyz = torch.rand(batch_size, 3 if not normal_channel else 6, num_points)
+    cls_label = torch.randint(0, 16, (batch_size,))
 
- 
+    # 前向传播
     t = time()
     pred, _ = model(xyz, cls_label)
-    t = timeit("Forward Propagation", t)
+    t = timeit("forward pass", t)
 
-
+    # 计算损失
     target = torch.randint(0, num_classes, (batch_size, num_points))
-    loss = get_loss()(pred, target)
+    loss = get_loss()(pred, target, None)
 
- 
+    # 反向传播和优化
     t = time()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    t = timeit("Backpropagation and Optimization", t)
+    t = timeit("backward and optimization", t)
 
-    print(f"Loss Value: {loss.item()}")
-    print(f"Predicted Output Shape: {pred.shape}")  
+    print(f"Loss: {loss.item()}")
     
