@@ -303,7 +303,6 @@ def main(args):
         log_string('ComplexRock Part 2 IoU is: %.5f' % complex_rock_part_ious[1])
         log_string('ComplexRock Part 3 IoU is: %.5f' % complex_rock_part_ious[2])
 
- 
         if test_metrics['inctance_avg_iou'] >= best_inctance_avg_iou:
             best_inctance_avg_iou = test_metrics['inctance_avg_iou']
             best_class_avg_iou = test_metrics['class_avg_iou']
