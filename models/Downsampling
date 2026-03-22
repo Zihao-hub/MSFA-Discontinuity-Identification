@@ -1,0 +1,703 @@
+import torch
+import numpy as np
+import pandas as pd
+import torch_cluster
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# 设置随机种子
+torch.manual_seed(42)
+np.random.seed(42)
+
+# 设置GPU设备
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"使用设备：{device}")
+
+# ------------------------------ 可视化工具函数 ------------------------------
+def visualize_prior_vector(G_g_n_cpu, G_c_n_cpu, save_path="prior_vector_scatter_no_sqrt.png"):
+    """
+    可视化先验算子2维空间分布（无平方根版本）
+    """
+    print("\n===== 先验算子可视化前数据校验 =====")
+    print(f"几何梯度分量维度：{G_g_n_cpu.shape}")
+    print(f"几何梯度分量值域：[{np.min(G_g_n_cpu):.6f}, {np.max(G_g_n_cpu):.6f}]")
+    
+    valid_mask = ~(np.isnan(G_g_n_cpu) | np.isinf(G_g_n_cpu) | 
+                   np.isnan(G_c_n_cpu) | np.isinf(G_c_n_cpu))
+    G_g_valid = G_g_n_cpu[valid_mask]
+    G_c_valid = G_c_n_cpu[valid_mask]
+    
+    fig, ax = plt.subplots(1, 1, figsize=(12, 9))
+    scatter = ax.scatter(
+        G_g_valid, G_c_valid, 
+        c='steelblue', s=5, alpha=0.8, edgecolors='none'
+    )
+    
+    ax.set_xlabel('几何梯度分量（G_g ∈ [-1, 0]）平坦→-1，凹凸→0', fontsize=14)
+    ax.set_ylabel('颜色梯度分量（G_c ∈ [0, 1]）', fontsize=14)
+    ax.set_title('先验算子2维空间分布（无平方根变换版本）', fontsize=16, pad=20)
+    ax.set_xlim(-1.0, 0.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=600, bbox_inches='tight')
+    plt.show()
+    print(f"先验算子可视化图已保存至：{save_path}")
+
+# ------------------------------ GPU版自适应下采样类（无平方根版本） ------------------------------
+class AdaptiveDownsamplingGPU_NoSqrt:
+    def __init__(self, geo_radius=0.5, color_radius=0.1, eps=1e-6, sample_l=0.5, alpha=0.8, 
+                 geo_max_neighbors=50, color_max_neighbors=20, min_neighbors=10, 
+                 curvature_normalization_factor=0.01, batch_size=5000):
+        """
+        初始化参数（无平方根变换版本）
+        """
+        self.geo_radius = geo_radius          
+        self.color_radius = color_radius      
+        self.eps = torch.tensor(eps, device=device)
+        self.sample_l = torch.tensor(sample_l, device=device)
+        self.alpha = torch.tensor(alpha, device=device)
+        self.geo_max_neighbors = geo_max_neighbors  
+        self.color_max_neighbors = color_max_neighbors
+        self.min_neighbors = min_neighbors
+        self.curvature_normalization_factor = curvature_normalization_factor
+        self.batch_size = batch_size
+        
+        # 保存中间结果
+        self.G_g_n_cpu = None    
+        self.G_c_n_cpu = None    
+        self.G_g_strength_cpu = None  
+        self.G_c_strength_cpu = None  
+        self.label_values = None
+        self.normals = None
+        self.curvatures = None
+
+    def _batch_radius_search(self, points, radius, max_candidates):
+        """
+        分批执行半径搜索
+        """
+        N = points.shape[0]
+        all_neighbor_idx = []
+        all_center_idx = []
+        
+        num_batches = (N + self.batch_size - 1) // self.batch_size
+        
+        with tqdm(total=num_batches, desc="半径搜索进度", unit="batch") as pbar:
+            for start in range(0, N, self.batch_size):
+                end = min(start + self.batch_size, N)
+                batch_points = points[start:end]
+                
+                batch_neighbor_idx, batch_center_idx = torch_cluster.radius(
+                    x=points,
+                    y=batch_points,
+                    r=radius,
+                    max_num_neighbors=max_candidates
+                )
+                
+                batch_center_idx = batch_center_idx + start
+                
+                valid_mask = (batch_center_idx >= 0) & (batch_center_idx < N)
+                batch_neighbor_idx = batch_neighbor_idx[valid_mask]
+                batch_center_idx = batch_center_idx[valid_mask]
+                
+                if len(batch_neighbor_idx) > 0 and len(batch_center_idx) > 0:
+                    all_neighbor_idx.append(batch_neighbor_idx)
+                    all_center_idx.append(batch_center_idx)
+                
+                pbar.update(1)
+                pbar.set_postfix({
+                    "当前批次": f"{start//self.batch_size + 1}/{num_batches}",
+                    "找到邻域对": len(batch_neighbor_idx)
+                })
+        
+        if len(all_neighbor_idx) == 0 or len(all_center_idx) == 0:
+            neighbor_idx = torch.tensor([], dtype=torch.long, device=device)
+            center_idx = torch.tensor([], dtype=torch.long, device=device)
+        else:
+            neighbor_idx = torch.cat(all_neighbor_idx, dim=0)
+            center_idx = torch.cat(all_center_idx, dim=0)
+        
+        return neighbor_idx, center_idx
+
+    def _compute_normals_with_min_neighbors(self, points, neighbor_idx, neighbor_ptr):
+        """
+        计算每个点的法向量
+        """
+        N = points.shape[0]
+        normals = torch.zeros((N, 3), device=device)
+        valid_count = 0
+        
+        with tqdm(total=N, desc="法向量计算", unit="point") as pbar:
+            for j in range(N):
+                start = neighbor_ptr[j].item()
+                end_j = neighbor_ptr[j+1].item()
+                
+                if start < end_j:
+                    neighbor_indices = neighbor_idx[start:end_j]
+                    
+                    if len(neighbor_indices) < self.min_neighbors:
+                        if len(neighbor_indices) >= 3:
+                            local_points = points[neighbor_indices]
+                        else:
+                            normals[j] = torch.tensor([0.0, 0.0, 1.0], device=device)
+                            pbar.update(1)
+                            continue
+                    else:
+                        local_points = points[neighbor_indices[:self.min_neighbors]]
+                    
+                    centroid = torch.mean(local_points, dim=0)
+                    centered = local_points - centroid
+                    cov_matrix = torch.matmul(centered.T, centered) / (len(local_points) - 1 + self.eps.item())
+                    
+                    try:
+                        eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)
+                        normal = eigenvectors[:, 0]
+                        
+                        if normal[2] < 0:
+                            normal = -normal
+                        
+                        normal_norm = torch.norm(normal)
+                        if normal_norm > self.eps.item():
+                            normal = normal / normal_norm
+                        
+                        normals[j] = normal
+                        valid_count += 1
+                    except:
+                        normals[j] = torch.tensor([0.0, 0.0, 1.0], device=device)
+                else:
+                    normals[j] = torch.tensor([0.0, 0.0, 1.0], device=device)
+                
+                pbar.update(1)
+        
+        self.normals = normals
+        return normals
+
+    def _estimate_curvature_with_validation(self, points, normals, neighbor_idx, neighbor_ptr):
+        """
+        曲率估计方法（保持不变）
+        """
+        N = points.shape[0]
+        curvatures = torch.zeros(N, device=device)
+        
+        print(f"曲率计算方法：点到切平面的平均距离")
+        print(f"归一化因子：{self.curvature_normalization_factor}")
+        
+        with tqdm(total=N, desc="曲率计算", unit="point") as pbar:
+            for j in range(N):
+                start = neighbor_ptr[j].item()
+                end_j = neighbor_ptr[j+1].item()
+                
+                if start < end_j:
+                    neighbor_indices = neighbor_idx[start:end_j]
+                    center_point = points[j]
+                    center_normal = normals[j]
+                    neighbor_points = points[neighbor_indices]
+                    
+                    displacements = neighbor_points - center_point.unsqueeze(0)
+                    signed_distances = torch.matmul(displacements, center_normal)
+                    distances = torch.abs(signed_distances)
+                    
+                    if len(distances) > 0:
+                        mean_distance = torch.mean(distances)
+                        curvature = mean_distance / (self.curvature_normalization_factor + self.eps.item())
+                        curvature = torch.clamp(curvature, 0.0, 10.0)
+                        curvatures[j] = curvature
+                    else:
+                        curvatures[j] = 0.0
+                else:
+                    curvatures[j] = 0.0
+                
+                pbar.update(1)
+        
+        # 验证曲率计算
+        curvatures_cpu = curvatures.cpu().numpy()
+        print(f"曲率范围：[{np.min(curvatures_cpu):.6f}, {np.max(curvatures_cpu):.6f}]")
+        print(f"曲率均值：{np.mean(curvatures_cpu):.6f}")
+        print(f"曲率中位数：{np.median(curvatures_cpu):.6f}")
+        
+        self.curvatures = curvatures
+        return curvatures
+
+    def _curvature_to_geometric_gradient_no_sqrt(self, curvatures):
+        """
+        无平方根变换的曲率到几何梯度映射
+        直接从归一化曲率映射到几何梯度
+        """
+        print("\n" + "=" * 60)
+        print("执行几何梯度映射（无平方根版本）")
+        print("关键变化：不使用平方根变换，直接映射")
+        print("=" * 60)
+        
+        curv_min = torch.min(curvatures)
+        curv_max = torch.max(curvatures)
+        
+        print(f"原始曲率统计：")
+        print(f"  最小值：{curv_min.item():.6f}（最平坦区域）")
+        print(f"  最大值：{curv_max.item():.6f}（最凹凸区域）")
+        
+        if curv_max - curv_min < self.eps.item():
+            curv_norm = torch.zeros_like(curvatures)
+        else:
+            # 线性归一化到 [0, 1]
+            curv_norm = (curvatures - curv_min) / (curv_max - curv_min + self.eps.item())
+        
+        print(f"\n归一化曲率统计：")
+        print(f"  范围：[{torch.min(curv_norm).item():.6f}, {torch.max(curv_norm).item():.6f}]")
+        print(f"  均值：{torch.mean(curv_norm).item():.6f}")
+        print(f"  中位数：{torch.median(curv_norm).item():.6f}")
+        
+        # ============================================================
+        # 关键变化：不使用平方根变换
+        # 原版：curv_transformed = torch.sqrt(curv_norm + self.eps.item())
+        # 新版：直接使用 curv_norm
+        # ============================================================
+        curv_transformed = curv_norm  # 直接使用归一化曲率
+        
+        print(f"\n无平方根变换，直接映射：")
+        print(f"  映射公式：G_g = - (1.0 - curv_norm)")
+        print(f"  物理意义：")
+        print(f"    - curv_norm=0（平坦）→ G_g = -1")
+        print(f"    - curv_norm=1（凹凸）→ G_g = 0")
+        
+        # 几何梯度计算（修正公式保持不变）
+        G_g = - (1.0 - curv_transformed)  # 平坦→-1，凹凸→0
+        G_g = torch.clamp(G_g, -1.0, 0.0)
+        
+        # 验证映射结果
+        self._validate_gradient_mapping_no_sqrt(curv_norm, curv_transformed, G_g)
+        
+        # 计算几何梯度强度（绝对值）
+        G_g_strength = torch.abs(G_g)
+        
+        return G_g, G_g_strength
+    
+    def _validate_gradient_mapping_no_sqrt(self, curv_norm, curv_transformed, G_g):
+        """
+        验证无平方根版本的梯度映射
+        """
+        curv_norm_cpu = curv_norm.cpu().numpy()
+        curv_transformed_cpu = curv_transformed.cpu().numpy()
+        G_g_cpu = G_g.cpu().numpy()
+        
+        # 找出曲率最小和最大的点
+        min_norm_idx = np.argmin(curv_norm_cpu)
+        max_norm_idx = np.argmax(curv_norm_cpu)
+        
+        print(f"\n梯度映射验证（无平方根）：")
+        print(f"  最平坦点：")
+        print(f"    归一化曲率：{curv_norm_cpu[min_norm_idx]:.6f}")
+        print(f"    几何梯度G_g：{G_g_cpu[min_norm_idx]:.6f}（应该接近-1）")
+        
+        print(f"  最凹凸点：")
+        print(f"    归一化曲率：{curv_norm_cpu[max_norm_idx]:.6f}")
+        print(f"    几何梯度G_g：{G_g_cpu[max_norm_idx]:.6f}（应该接近0）")
+        
+        # 采样验证
+        sample_indices = np.random.choice(len(G_g_cpu), 10, replace=False)
+        print(f"\n随机采样验证（无平方根）：")
+        print(f"{'索引':<6} {'曲率':<10} {'G_g':<10} {'状态':<12}")
+        print("-" * 50)
+        
+        for idx in sample_indices:
+            norm = curv_norm_cpu[idx]
+            g_g = G_g_cpu[idx]
+            
+            if g_g < -0.8:
+                status = "非常平坦"
+            elif g_g < -0.5:
+                status = "平坦"
+            elif g_g < -0.2:
+                status = "轻微凹凸"
+            else:
+                status = "凹凸/边缘"
+            
+            print(f"{idx:<6} {norm:<10.6f} {g_g:<10.6f} {status:<12}")
+        
+        # 分析分布
+        print(f"\n几何梯度整体分布（无平方根）：")
+        bins = np.linspace(-1.0, 0.0, 11)
+        hist, _ = np.histogram(G_g_cpu, bins=bins)
+        N = len(G_g_cpu)
+        
+        for i in range(len(hist)):
+            percent = hist[i]/N*100 if N > 0 else 0
+            bar = "█" * int(percent/2)
+            range_str = f"[{bins[i]:.2f}, {bins[i+1]:.2f})"
+            
+            if bins[i] < -0.8:
+                explanation = "非常平坦"
+            elif bins[i] < -0.5:
+                explanation = "平坦"
+            elif bins[i] < -0.2:
+                explanation = "轻微凹凸"
+            else:
+                explanation = "凹凸/边缘"
+            
+            print(f"  {range_str:15} {hist[i]:6d}点 ({percent:5.1f}%) {bar} {explanation}")
+
+    def _get_neighbors_by_radius(self, points, radius, max_neighbors):
+        """
+        邻域生成
+        """
+        N = points.shape[0]
+        max_candidates = max_neighbors
+        
+        neighbor_idx, center_idx = self._batch_radius_search(points, radius, max_candidates)
+        
+        counts = torch.bincount(center_idx, minlength=N)
+        neighbor_ptr = torch.zeros(N + 1, dtype=torch.long, device=device)
+        neighbor_ptr[1:] = torch.cumsum(counts, dim=0)
+        
+        torch.cuda.empty_cache()
+        
+        return neighbor_idx, neighbor_ptr
+
+    def _compute_geometric_gradient_no_sqrt(self, points):
+        """
+        无平方根版本的几何梯度计算
+        """
+        print("\n" + "=" * 60)
+        print("开始计算几何梯度（无平方根版本）")
+        print("变化：跳过平方根变换，直接使用归一化曲率")
+        print("=" * 60)
+        
+        N = points.shape[0]
+        
+        print(f"\n步骤1: 计算法向量...")
+        min_neighbor_idx, min_center_idx = self._batch_radius_search(
+            points, self.geo_radius * 0.5, self.min_neighbors * 3
+        )
+        min_counts = torch.bincount(min_center_idx, minlength=N)
+        min_neighbor_ptr = torch.zeros(N + 1, dtype=torch.long, device=device)
+        min_neighbor_ptr[1:] = torch.cumsum(min_counts, dim=0)
+        normals = self._compute_normals_with_min_neighbors(points, min_neighbor_idx, min_neighbor_ptr)
+        
+        print(f"\n步骤2: 估计曲率...")
+        curvature_neighbor_idx, curvature_neighbor_ptr = self._get_neighbors_by_radius(
+            points, self.geo_radius, self.geo_max_neighbors
+        )
+        curvatures = self._estimate_curvature_with_validation(points, normals, curvature_neighbor_idx, curvature_neighbor_ptr)
+        
+        print(f"\n步骤3: 将曲率映射到几何梯度（无平方根）")
+        G_g_n, G_g_strength = self._curvature_to_geometric_gradient_no_sqrt(curvatures)
+        
+        torch.cuda.empty_cache()
+        
+        return G_g_n, G_g_strength
+
+    def _compute_color_gradient(self, points, colors):
+        """
+        计算颜色梯度（保持不变）
+        """
+        print("\n=== 颜色梯度计算 ===")
+        
+        color_neighbor_idx, color_neighbor_ptr = self._get_neighbors_by_radius(
+            points, self.color_radius, self.color_max_neighbors
+        )
+        
+        N = points.shape[0]
+        G_c = torch.zeros((N, 3), device=device)
+        
+        if len(color_neighbor_idx) > 0:
+            with tqdm(total=N, desc="颜色梯度计算", unit="point") as pbar:
+                for j in range(N):
+                    start = color_neighbor_ptr[j].item()
+                    end_j = color_neighbor_ptr[j+1].item()
+                    if start < end_j:
+                        neighbor_colors = colors[color_neighbor_idx[start:end_j]]
+                        center_colors = colors[j].unsqueeze(0).repeat(neighbor_colors.shape[0], 1)
+                        color_diff = neighbor_colors - center_colors
+                        color_diff_norm = torch.norm(color_diff, dim=1)
+                        max_color_diff = torch.max(color_diff_norm)
+                        G_c[j] = torch.tensor([max_color_diff, max_color_diff, max_color_diff], device=device)
+                    pbar.update(1)
+        
+        # 归一化
+        G_c_norm = torch.norm(G_c, dim=1)
+        G_c_norm = torch.where(G_c_norm == 0, self.eps.item(), G_c_norm)
+        G_c_min = torch.min(G_c_norm)
+        G_c_max = torch.max(G_c_norm)
+        G_c_n = (G_c_norm - G_c_min) / (G_c_max - G_c_min + self.eps.item())
+        G_c_n = torch.clamp(G_c_n, 0.0, 1.0)
+        
+        G_c_strength = G_c_n
+        
+        torch.cuda.empty_cache()
+        
+        return G_c_n, G_c_strength
+
+    def _compute_dynamic_label(self):
+        """
+        计算动态标签值（保持不变）
+        """
+        print("\n计算动态标签值...")
+        
+        g_mean = np.mean(self.G_g_strength_cpu)
+        g_std = np.std(self.G_g_strength_cpu) + self.eps.cpu().numpy().item()
+        G_g_std = (self.G_g_strength_cpu - g_mean) / g_std
+        
+        c_mean = np.mean(self.G_c_strength_cpu)
+        c_std = np.std(self.G_c_strength_cpu) + self.eps.cpu().numpy().item()
+        G_c_std = (self.G_c_strength_cpu - c_mean) / c_std
+        
+        G_g_norm = (G_g_std - np.min(G_g_std)) / (np.max(G_g_std) - np.min(G_g_std) + self.eps.cpu().numpy().item())
+        G_c_norm = (G_c_std - np.min(G_c_std)) / (np.max(G_c_std) - np.min(G_c_std) + self.eps.cpu().numpy().item())
+        
+        geo_bigger = G_g_norm > G_c_norm
+        
+        self.label_values = np.where(
+            geo_bigger, 
+            self.G_g_n_cpu,
+            self.G_c_n_cpu
+        )
+        
+        print(f"几何强度占优点数：{np.sum(geo_bigger)}/{len(geo_bigger)} ({np.sum(geo_bigger)/len(geo_bigger)*100:.1f}%)")
+        print(f"标签值范围：[{np.min(self.label_values):.6f}, {np.max(self.label_values):.6f}]")
+        
+        return self.G_g_strength_cpu, self.G_g_strength_cpu ** self.sample_l.cpu().numpy().item()
+
+    def _adaptive_sampling(self, target_num):
+        """
+        自适应下采样（保持不变）
+        """
+        print("\n开始自适应下采样...")
+        sample_base, sample_value = self._compute_dynamic_label()
+        
+        N = len(sample_base)
+        
+        if target_num >= N:
+            print(f"目标点数≥原始点数，返回所有点")
+            return torch.arange(N, device=device).cpu()
+        
+        sample_sum = np.sum(sample_value)
+        if sample_sum < self.eps.cpu().numpy().item():
+            sample_value = np.ones_like(sample_value) * self.eps.cpu().numpy().item()
+            sample_sum = np.sum(sample_value)
+        
+        P_i = sample_value / sample_sum
+        P_i = np.nan_to_num(P_i, nan=1e-8, posinf=1e-8, neginf=1e-8)
+        P_i = P_i / np.sum(P_i)
+        
+        print(f"正在进行无放回采样，目标点数：{target_num}...")
+        sampled_idx = np.random.choice(N, size=target_num, replace=False, p=P_i)
+        sampled_idx = torch.tensor(sampled_idx, dtype=torch.long)
+        
+        return sampled_idx
+
+    def run(self, points_np, colors_np, target_num):
+        """
+        主流程（无平方根版本）
+        """
+        print("=" * 60)
+        print("自适应点云下采样开始（无平方根版本）")
+        print("关键变化：不使用平方根变换增强平坦区域区分度")
+        print("=" * 60)
+        
+        print(f"原始点云总数：{len(points_np)}")
+        print(f"目标采样点数：{target_num}")
+        
+        total_steps = 7
+        with tqdm(total=total_steps, desc="总进度", unit="step") as total_pbar:
+            # Step 1: 数据迁移至GPU
+            points = torch.tensor(points_np, dtype=torch.float32, device=device)
+            colors = torch.tensor(colors_np, dtype=torch.float32, device=device)
+            torch.cuda.empty_cache()
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "数据迁移完成"})
+            
+            # Step 2: 计算几何梯度（无平方根）
+            print("\nStep 2: 计算几何梯度（无平方根版本）...")
+            G_g_n, G_g_strength = self._compute_geometric_gradient_no_sqrt(points)
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "几何梯度计算完成"})
+            
+            # Step 3: 计算颜色梯度
+            print("\nStep 3: 计算颜色梯度...")
+            G_c_n, G_c_strength = self._compute_color_gradient(points, colors)
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "颜色梯度计算完成"})
+            
+            # Step 4: 迁移数据至CPU
+            print("\nStep 4: 迁移数据至CPU...")
+            self.G_g_n_cpu = G_g_n.cpu().numpy()
+            self.G_c_n_cpu = G_c_n.cpu().numpy()
+            self.G_g_strength_cpu = G_g_strength.cpu().numpy()
+            self.G_c_strength_cpu = G_c_strength.cpu().numpy()
+            del points, colors, G_g_n, G_g_strength, G_c_n, G_c_strength
+            torch.cuda.empty_cache()
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "数据迁移CPU完成"})
+            
+            # Step 5: 可视化
+            print("\nStep 5: 可视化先验算子...")
+            visualize_prior_vector(self.G_g_n_cpu, self.G_c_n_cpu, "prior_vector_scatter_no_sqrt.png")
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "可视化完成"})
+            
+            # Step 6: 自适应下采样
+            print("\nStep 6: 自适应下采样...")
+            sampled_idx = self._adaptive_sampling(target_num)
+            sampled_idx_np = sampled_idx.numpy()
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "下采样完成"})
+            
+            # Step 7: 拼接输出
+            print("\nStep 7: 拼接输出数据...")
+            raw_8col_prior = np.hstack([
+                points_np, 
+                colors_np, 
+                self.G_g_n_cpu.reshape(-1, 1),
+                self.G_c_n_cpu.reshape(-1, 1)
+            ])
+            
+            raw_7col_label = np.hstack([
+                points_np,
+                colors_np,
+                self.label_values.reshape(-1, 1)
+            ])
+            
+            sampled_7col_label = raw_7col_label[sampled_idx_np]
+            total_pbar.update(1)
+            total_pbar.set_postfix({"当前步骤": "结果输出完成"})
+        
+        # 保存文件
+        pd.DataFrame(raw_8col_prior).to_csv(
+            "raw_8col_prior_vector_no_sqrt.txt",
+            index=False,
+            header=False,
+            sep=" "
+        )
+        pd.DataFrame(raw_7col_label).to_csv(
+            "raw_7col_dynamic_label_no_sqrt.txt",
+            index=False,
+            header=False,
+            sep=" "
+        )
+        pd.DataFrame(sampled_7col_label).to_csv(
+            "sampled_10w_7col_dynamic_label_no_sqrt.txt",
+            index=False,
+            header=False,
+            sep=" "
+        )
+        
+        # 最终分析
+        self._final_analysis_no_sqrt()
+        
+        return raw_8col_prior, raw_7col_label, sampled_7col_label, sampled_idx_np
+    
+    def _final_analysis_no_sqrt(self):
+        """
+        无平方根版本的最终分析
+        """
+        print("\n" + "=" * 60)
+        print("最终分析（无平方根版本）")
+        print("=" * 60)
+        
+        G_g_cpu = self.G_g_n_cpu
+        
+        # 统计分布
+        very_flat = np.sum(G_g_cpu < -0.8)
+        flat = np.sum((G_g_cpu >= -0.8) & (G_g_cpu < -0.5))
+        slightly_bumpy = np.sum((G_g_cpu >= -0.5) & (G_g_cpu < -0.2))
+        bumpy = np.sum(G_g_cpu >= -0.2)
+        
+        total = len(G_g_cpu)
+        
+        print(f"几何梯度分布（无平方根）：")
+        print(f"  非常平坦 (<-0.8): {very_flat}点 ({very_flat/total*100:.1f}%)")
+        print(f"  平坦 (-0.8~-0.5): {flat}点 ({flat/total*100:.1f}%)")
+        print(f"  轻微凹凸 (-0.5~-0.2): {slightly_bumpy}点 ({slightly_bumpy/total*100:.1f}%)")
+        print(f"  凹凸/边缘 (≥-0.2): {bumpy}点 ({bumpy/total*100:.1f}%)")
+        
+        print(f"\n总结（无平方根版本）：")
+        print(f"  1. 不使用平方根变换，曲率直接映射到几何梯度")
+        print(f"  2. 平坦区域和凹凸区域的映射关系保持不变：")
+        print(f"     平坦→G_g接近-1，凹凸→G_g接近0")
+        print(f"  3. 平坦区域的微小差异不会被放大")
+        print(f"  4. 适用于曲率分布相对均匀的场景")
+
+# ------------------------------ 比较函数 ------------------------------
+def compare_sqrt_vs_no_sqrt():
+    """
+    比较平方根版本和无平方根版本的区别
+    """
+    print("\n" + "=" * 70)
+    print("平方根版本 vs 无平方根版本 对比分析")
+    print("=" * 70)
+    
+    print("\n主要区别：")
+    print("1. 平方根版本（原版）：")
+    print("   - 使用 curv_transformed = √(curv_norm)")
+    print("   - 放大低曲率区（平坦区域）的差异")
+    print("   - 压缩高曲率区（凹凸区域）的差异")
+    print("   - 适用于大部分区域平坦的点云")
+    
+    print("\n2. 无平方根版本（本版）：")
+    print("   - 使用 curv_transformed = curv_norm（直接映射）")
+    print("   - 保持线性关系")
+    print("   - 平坦和凹凸区域的权重相等")
+    print("   - 适用于曲率分布均匀的点云")
+    
+    print("\n数值示例对比：")
+    print(f"{'曲率':<8} {'平方根版G_g':<15} {'无平方根版G_g':<15} {'解释':<20}")
+    print("-" * 60)
+    
+    test_curvatures = [0.01, 0.04, 0.09, 0.25, 0.49, 0.81, 1.00]
+    
+    for curv in test_curvatures:
+        # 平方根版本
+        sqrt_transformed = np.sqrt(curv)
+        G_g_sqrt = - (1.0 - sqrt_transformed)
+        
+        # 无平方根版本
+        G_g_no_sqrt = - (1.0 - curv)
+        
+        if curv < 0.1:
+            explanation = "平坦区域"
+        elif curv < 0.5:
+            explanation = "中等区域"
+        else:
+            explanation = "凹凸区域"
+        
+        print(f"{curv:<8.3f} {G_g_sqrt:<15.3f} {G_g_no_sqrt:<15.3f} {explanation:<20}")
+
+# ------------------------------ 主函数 ------------------------------
+if __name__ == "__main__":
+    # 读取数据
+    print("正在读取TXT点云数据...")
+    txt_path = r"E:\pointnet2\Pointnet_Pointnet2_pytorch-master\duomotaiduibi\adaptive_downsampling\(3)无色pointnet - Cloud.txt"
+    df = pd.read_csv(
+        txt_path, 
+        sep=r'\s+',
+        header=None, 
+        names=["X", "Y", "Z", "R", "G", "B"]
+    )
+    
+    points_np = df[["X", "Y", "Z"]].values.astype(np.float32)
+    colors_np = df[["R", "G", "B"]].values.astype(np.float32)
+    if np.max(colors_np) <= 1.0:
+        colors_np = colors_np * 255.0
+    
+    print(f"读取完成！原始点云数量：{len(points_np)}")
+    
+    # 运行比较分析
+    compare_sqrt_vs_no_sqrt()
+    
+    # 使用无平方根版本的算法
+    ad_gpu_no_sqrt = AdaptiveDownsamplingGPU_NoSqrt(
+        geo_radius=0.1,
+        color_radius=0.1,
+        sample_l=0.5,
+        alpha=1,
+        geo_max_neighbors=20,
+        color_max_neighbors=20,
+        min_neighbors=20,
+        curvature_normalization_factor=0.2,
+        batch_size=5000
+    )
+    
+    target_num = 100000
+    raw_8col_prior, raw_7col_label, sampled_7col_label, sampled_idx = ad_gpu_no_sqrt.run(
+        points_np, colors_np, target_num
+    )
