@@ -13,7 +13,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
-
 seg_classes = {'ComplexRock': [1, 2, 3]}
 
 seg_label_to_cat = {}  # {1:ComplexRock, 2:ComplexRock, 3:ComplexRock}
